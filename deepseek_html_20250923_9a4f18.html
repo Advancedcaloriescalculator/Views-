@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Multi View Browser - View multiple websites simultaneously with auto-refresh and mobile optimization" />
+    <meta name="keywords" content="multi view, browser, iframe, mobile, react" />
+    <title>Multi View Browser - Simultaneous Website Viewer</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/react-icons@4.12.0/fi/index.css" rel="stylesheet">
+    <style>
+        .iframe-container {
+            transition: all 0.3s ease;
+        }
+        .iframe-container.fullscreen {
+            position: fixed;
+            inset: 0;
+            z-index: 50;
+            border-radius: 0;
+        }
+        .swipe-transition {
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #f3f4f6;
+        }
+        .dark ::-webkit-scrollbar-track {
+            background: #374151;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #9ca3af;
+            border-radius: 9999px;
+        }
+        .dark ::-webkit-scrollbar-thumb {
+            background: #4b5563;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #6b7280;
+        }
+        .dark ::-webkit-scrollbar-thumb:hover {
+            background: #6b7280;
+        }
+    </style>
+</head>
+<body class="h-full bg-gray-50 dark:bg-gray-900">
+    <div id="root" class="h-full"></div>
+    
+    <script type="text/babel">
+        // Utility functions
+        const validateUrl = (url) => {
+            if (!url) return false;
+            try {
+                const urlObj = new URL(url.startsWith('http') ? url : `https://${url}`);
+                return urlObj.protocol === 'http:' || urlObj.protocol === 'https:';
+            } catch {
+                return false;
+            }
+        };
+
+        const formatUrl = (url) => {
+            if (!url) return '';
+            return url.startsWith('http') ? url : `https://${url}`;
+        };
+
+        const requiresInterstitial = (screenCount) => {
+            return [15, 20, 30, 40, 50].includes(screenCount);
+        };
+
+        // Custom hook for localStorage
+        const useLocalStorage = (key, initialValue) => {
+            const [storedValue, setStoredValue] = React.useState(() => {
+                try {
+                    const item = window.localStorage.getItem(key);
+                    return item ? JSON.parse(item) : initialValue;
+                } catch (error) {
+                    return initialValue;
+                }
+            });
+
+            const setValue = (value) => {
+                try {
+                    setStoredValue(value);
+                    window.localStorage.setItem(key, JSON.stringify(value));
+                } catch (error) {
+                    console.error(`Error setting localStorage key "${key}":`, error);
+                }
+            };
+
+            return [storedValue, setValue];
+        };
+
+        // Custom hook for swipe gestures
+        const useSwipe = (onSwipeLeft, onSwipeRight, threshold = 50) => {
+            const touchStartX = React.useRef(0);
+            const touchEndX = React.useRef(0);
+
+            const handleTouchStart = React.useCallback((e) => {
+                touchStartX.current = e.touches[0].clientX;
+            }, []);
+
+            const handleTouchMove = React.useCallback((e) => {
+                touchEndX.current = e.touches[0].clientX;
+            }, []);
+
+            const handleTouchEnd = React.useCallback(() => {
+                const diff = touchStartX.current - touchEndX.current;
+                
+                if (Math.abs(diff) > threshold) {
+                    if (diff > 0) {
+                        onSwipeLeft?.();
+                    } else {
+                        onSwipeRight?.();
+                    }
+                }
+                
+                touchStartX.current = 0;
+                touchEndX.current = 0;
+            }, [threshold, onSwipeLeft, onSwipeRight]);
+
+            return {
+                onTouchStart: handleTouchStart,
+                onTouchMove: handleTouchMove,
+                onTouchEnd: handleTouchEnd,
+            };
+        };
+
+        // IframeWrapper Component
+        const IframeWrapper = ({ 
+            url, 
+            index, 
+            timerDuration, 
+            onRefresh, 
+            viewCount,
+            isCarousel,
+            isActive
+        }) => {
+            const [timeLeft, setTimeLeft] = React.useState(timerDuration);
+            const [isFullscreen, setIsFullscreen] = React.useState(false);
+            const [isLoading, setIsLoading] = React.useState(true);
+            const iframeRef = React.useRef(null);
+            const timerRef = React.useRef(null);
+
+            React.useEffect(() => {
+                setTimeLeft(timerDuration);
+                setIsLoading(true);
+            }, [url, timerDuration]);
+
+            React.useEffect(() => {
+                if (timeLeft === 0) {
+                    onRefresh();
+                    setTimeLeft(timerDuration);
+                } else {
+                    timerRef.current = setTimeout(() => {
+                        setTimeLeft(timeLeft - 1);
+                    }, 1000);
+                }
+
+                return () => clearTimeout(timerRef.current);
+            }, [timeLeft, timerDuration, onRefresh]);
+
+            const handleRefresh = () => {
+                if (iframeRef.current) {
+                    iframeRef.current.src += '';
+                }
+                setTimeLeft(timerDuration);
+                onRefresh();
+            };
+
+            const toggleFullscreen = () => {
+                setIsFullscreen(!isFullscreen);
+            };
+
+            const formatTime = (seconds) => {
+                const mins = Math.floor(seconds / 60);
+                const secs = seconds % 60;
+                return `${mins}:${secs.toString().padStart(2, '0')}`;
+            };
+
+            const openInNewTab = () => {
+                window.open(url.startsWith('http') ? url : `https://${url}`, '_blank');
+            };
+
+            if (isCarousel && !isActive) {
+                return null;
+            }
+
+            return React.createElement('div', {
+                className: `
+                    relative bg-white dark:bg-gray-800 rounded-lg shadow-lg overflow-hidden
+                    ${isFullscreen ? 'fixed inset-0 z-50 rounded-none' : ''}
+                    ${isCarousel ? 'w-full h-full flex-shrink-0' : ''}
+                `
+            }, [
+                // Header Bar
+                React.createElement('div', {
+                    key: 'header',
+                    className: "flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 border-b border-gray-200 dark:border-gray-600"
+                }, [
+                    React.createElement('div', {
+                        key: 'left',
+                        className: "flex items-center gap-3 flex-1 min-w-0"
+                    }, [
+                        React.createElement('span', {
+                            key: 'index',
+                            className: "px-2 py-1 bg-blue-500 text-white text-sm font-medium rounded-md"
+                        }, `#${index + 1}`),
+                        React.createElement('div', {
+                            key: 'info',
+                            className: "flex-1 min-w-0"
+                        }, [
+                            React.createElement('p', {
+                                key: 'url',
+                                className: "text-sm font-medium text-gray-900 dark:text-white truncate"
+                            }, url),
+                            React.createElement('div', {
+                                key: 'stats',
+                                className: "flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400"
+                            }, [
+                                React.createElement('span', { key: 'views' }, `Views: ${viewCount}`),
+                                React.createElement('span', { key: 'dot' }, '•'),
+                                React.createElement('span', { key: 'timer' }, `Refresh: ${formatTime(timeLeft)}`)
+                            ])
+                        ])
+                    ]),
+                    
+                    React.createElement('div', {
+                        key: 'controls',
+                        className: "flex items-center gap-1"
+                    }, [
+                        React.createElement('button', {
+                            key: 'refresh',
+                            onClick: handleRefresh,
+                            disabled: isLoading,
+                            className: "p-2 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 disabled:opacity-50 transition-colors",
+                            title: "Refresh"
+                        }, React.createElement('i', { className: `fi-refresh-cw ${isLoading ? 'animate-spin' : ''}` })),
+                        
+                        React.createElement('button', {
+                            key: 'new-tab',
+                            onClick: openInNewTab,
+                            className: "p-2 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors",
+                            title: "Open in new tab"
+                        }, React.createElement('i', { className: "fi-external-link" })),
+                        
+                        React.createElement('button', {
+                            key: 'fullscreen',
+                            onClick: toggleFullscreen,
+                            className: "p-2 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors",
+                            title: isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'
+                        }, React.createElement('i', { className: isFullscreen ? "fi-minimize" : "fi-maximize" }))
+                    ])
+                ]),
+
+                // Iframe
+                React.createElement('div', {
+                    key: 'iframe-container',
+                    className: "relative",
+                    style: { height: isFullscreen ? 'calc(100vh - 60px)' : '400px' }
+                }, [
+                    isLoading && React.createElement('div', {
+                        key: 'loading',
+                        className: "absolute inset-0 flex items-center justify-center bg-gray-100 dark:bg-gray-800"
+                    }, React.createElement('div', {
+                        className: "animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"
+                    })),
+                    
+                    React.createElement('iframe', {
+                        key: 'iframe',
+                        ref: iframeRef,
+                        src: url.startsWith('http') ? url : `https://${url}`,
+                        className: "w-full h-full border-0",
+                        onLoad: () => setIsLoading(false),
+                        onError: () => setIsLoading(false),
+                        title: `Screen ${index + 1} - ${url}`,
+                        allow: "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture",
+                        allowFullScreen: true
+                    })
+                ]),
+
+                // Exit fullscreen overlay
+                isFullscreen && React.createElement('div', {
+                    key: 'exit-fullscreen',
+                    className: "absolute top-2 right-2"
+                }, React.createElement('button', {
+                    onClick: toggleFullscreen,
+                    className: "px-3 py-1 bg-black bg-opacity-50 text-white rounded-md text-sm hover:bg-opacity-70 transition-colors"
+                }, "Exit"))
+            ]);
+        };
+
+        // ScreenContainer Component
+        const ScreenContainer = ({ 
+            url, 
+            screenCount, 
+            timerDuration, 
+            layout,
+            viewCounts,
+            updateViewCount 
+        }) => {
+            const [currentSlide, setCurrentSlide] = React.useState(0);
+            const swipeHandlers = useSwipe(
+                () => setCurrentSlide(prev => Math.min(prev + 1, screenCount - 1)),
+                () => setCurrentSlide(prev => Math.max(prev - 1, 0))
+            );
+
+            React.useEffect(() => {
+                setCurrentSlide(0);
+            }, [screenCount]);
+
+            const handleRefresh = (index) => {
+                updateViewCount(index);
+            };
+
+            if (layout === 'carousel') {
+                return React.createElement('div', {
+                    className: "flex-1 overflow-hidden relative",
+                    ...swipeHandlers
+                }, [
+                    React.createElement('div', {
+                        key: 'carousel',
+                        className: "flex h-full transition-transform duration-300 ease-out",
+                        style: { transform: `translateX(-${currentSlide * 100}%)` }
+                    }, Array.from({ length: screenCount }).map((_, index) => 
+                        React.createElement('div', {
+                            key: index,
+                            className: "w-full h-full flex-shrink-0 p-4"
+                        }, React.createElement(IframeWrapper, {
+                            url: url,
+                            index: index,
+                            timerDuration: timerDuration,
+                            onRefresh: () => handleRefresh(index),
+                            viewCount: viewCounts[index] || 0,
+                            isCarousel: true,
+                            isActive: currentSlide === index
+                        }))
+                    )),
+
+                    // Navigation Dots
+                    screenCount > 1 && React.createElement('div', {
+                        key: 'navigation',
+                        className: "absolute bottom-4 left-1/2 transform -translate-x-1/2 flex gap-2"
+                    }, Array.from({ length: screenCount }).map((_, index) => 
+                        React.createElement('button', {
+                            key: index,
+                            onClick: () => setCurrentSlide(index),
+                            className: `w-3 h-3 rounded-full transition-all ${
+                                currentSlide === index 
+                                    ? 'bg-blue-500 scale-125' 
+                                    : 'bg-gray-300 dark:bg-gray-600'
+                            }`
+                        })
+                    ))
+                ]);
+            }
+
+            // Stacked layout
+            return React.createElement('div', {
+                className: "flex-1 overflow-y-auto"
+            }, React.createElement('div', {
+                className: "grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4 p-4"
+            }, Array.from({ length: screenCount }).map((_, index) => 
+                React.createElement(IframeWrapper, {
+                    key: index,
+                    url: url,
+                    index: index,
+                    timerDuration: timerDuration,
+                    onRefresh: () => handleRefresh(index),
+                    viewCount: viewCounts[index] || 0,
+                    isCarousel: false,
+                    isActive: true
+                })
+            )));
+        };
+
+        // AdBanner Component
+        const AdBanner = () => {
+            return React.createElement('div', {
+                className: "w-full bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-gray-800 dark:to-gray-700 border-t border-gray-200 dark:border-gray-600 lg:hidden"
+            }, React.createElement('div', {
+                className: "container mx-auto px-4 py-4"
+            }, React.createElement('div', {
+                className: "flex items-center justify-center"
+            }, React.createElement('div', {
+                className: "w-full max-w-4xl h-24 bg-gradient-to-r from-blue-100 to-indigo-100 dark:from-gray-700 dark:to-gray-600 rounded-lg border-2 border-dashed border-blue-300 dark:border-gray-500 flex items-center justify-center"
+            }, React.createElement('div', {
+                className: "text-center"
+            }, [
+                React.createElement('div', {
+                    key: 'title',
+                    className: "text-blue-500 dark:text-blue-400 font-medium mb-1"
+                }, "Advertisement"),
+                React.createElement('div', {
+                    key: 'subtitle',
+                    className: "text-gray-500 dark:text-gray-400 text-sm"
+                }, "Banner Ad (320×100) - Mobile Optimized")
+            ]))))));
+        };
+
+        // InterstitialAd Component
+        const InterstitialAd = ({ isOpen, onClose, onComplete }) => {
+            const [timeLeft, setTimeLeft] = React.useState(5);
+
+            React.useEffect(() => {
+                if (isOpen && timeLeft > 0) {
+                    const timer = setTimeout(() => {
+                        setTimeLeft(timeLeft - 1);
+                    }, 1000);
+                    return () => clearTimeout(timer);
+                } else if (timeLeft === 0) {
+                    onComplete();
+                }
+            }, [isOpen, timeLeft, onComplete]);
+
+            if (!isOpen) return null;
+
+            return React.createElement('div', {
+                className: "fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4"
+            }, React.createElement('div', {
+                className: "bg-white dark:bg-gray-800 rounded-xl max-w-md w-full mx-auto shadow-2xl"
+            }, [
+                // Header
+                React.createElement('div', {
+                    key: 'header',
+                    className: "flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700"
+                }, [
+                    React.createElement('h3', {
+                        key: 'title',
+                        className: "text-lg font-semibold text-gray-900 dark:text-white"
+                    }, "Advertisement"),
+                    React.createElement('button', {
+                        key: 'close',
+                        onClick: onClose,
+                        className: "p-1 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                    }, React.createElement('i', { className: "fi-x" }))
+                ]),
+
+                // Ad Content
+                React.createElement('div', {
+                    key: 'content',
+                    className: "p-6"
+                }, [
+                    React.createElement('div', {
+                        key: 'ad',
+                        className: "bg-gradient-to-br from-purple-500 to-pink-500 rounded-lg h-64 flex items-center justify-center mb-4"
+                    }, React.createElement('div', {
+                        className: "text-white text-center"
+                    }, [
+                        React.createElement('div', {
+                            key: 'main',
+                            className: "text-2xl font-bold mb-2"
+                        }, "Interstitial Ad"),
+                        React.createElement('div', {
+                            key: 'sub',
+                            className: "text-sm opacity-90"
+                        }, "Full-screen mobile advertisement")
+                    ])),
+                    
+                    React.createElement('div', {
+                        key: 'timer',
+                        className: "flex items-center justify-center gap-2 text-gray-600 dark:text-gray-400"
+                    }, [
+                        React.createElement('i', { key: 'icon', className: "fi-clock text-blue-500" }),
+                        React.createElement('span', { key: 'text' }, `Ad closes in ${timeLeft} seconds...`)
+                    ])
+                ]),
+
+                // Footer
+                React.createElement('div', {
+                    key: 'footer',
+                    className: "p-4 border-t border-gray-200 dark:border-gray-700"
+                }, React.createElement('button', {
+                    onClick: onComplete,
+                    disabled: timeLeft > 0,
+                    className: `w-full py-3 rounded-lg font-medium transition-colors ${
+                        timeLeft > 0
+                            ? 'bg-gray-300 dark:bg-gray-600 text-gray-500 cursor-not-allowed'
+                            : 'bg-green-500 hover:bg-green-600 text-white'
+                    }`
+                }, timeLeft > 0 ? `Skip Ad (${timeLeft}s)` : 'Continue to App'))
+            ]));
+        };
+
+        // HistoryPanel Component
+        const HistoryPanel = ({ history, showHistory, setShowHistory, loadUrlFromHistory, clearHistory }) => {
+            return React.createElement(React.Fragment, {}, [
+                // Overlay
+                showHistory && React.createElement('div', {
+                    key: 'overlay',
+                    className: "fixed inset-0 bg-black bg-opacity-50 z-50 lg:hidden",
+                    onClick: () => setShowHistory(false)
+                }),
+                
+                // Panel
+                React.createElement('div', {
+                    key: 'panel',
+                    className: `
+                        fixed lg:static inset-y-0 left-0 w-80 bg-white dark:bg-gray-800 shadow-xl z-50 transform transition-transform duration-300 ease-in-out
+                        ${showHistory ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0 lg:shadow-none
+                    `
+                }, React.createElement('div', {
+                    className: "h-full flex flex-col"
+                }, [
+                    // Header
+                    React.createElement('div', {
+                        key: 'header',
+                        className: "flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700"
+                    }, [
+                        React.createElement('div', {
+                            key: 'title-container',
+                            className: "flex items-center gap-2"
+                        }, [
+                            React.createElement('i', { key: 'icon', className: "fi-clock text-blue-500" }),
+                            React.createElement('h2', {
+                                key: 'title',
+                                className: "text-lg font-semibold text-gray-900 dark:text-white"
+                            }, "History")
+                        ]),
+                        React.createElement('div', {
+                            key: 'controls',
+                            className: "flex items-center gap-2"
+                        }, [
+                            React.createElement('button', {
+                                key: 'clear',
+                                onClick: clearHistory,
+                                className: "p-2 text-red-500 hover:bg-red-50 dark:hover:bg-red-900 rounded-lg transition-colors",
+                                title: "Clear history"
+                            }, React.createElement('i', { className: "fi-trash-2" })),
+                            React.createElement('button', {
+                                key: 'close',
+                                onClick: () => setShowHistory(false),
+                                className: "p-2 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg lg:hidden transition-colors"
+                            }, React.createElement('i', { className: "fi-x" }))
+                        ])
+                    ]),
+
+                    // History List
+                    React.createElement('div', {
+                        key: 'content',
+                        className: "flex-1 overflow-y-auto p-4"
+                    }, history.length === 0 ? 
+                        React.createElement('p', {
+                            className: "text-gray-500 dark:text-gray-400 text-center py-8"
+                        }, "No history yet. Start browsing to see your history here.")
+                    : React.createElement('div', {
+                        className: "space-y-2"
+                    }, history.map((item, index) => 
+                        React.createElement('div', {
+                            key: index,
+                            onClick: () => loadUrlFromHistory(item),
+                            className: "p-3 bg-gray-50 dark:bg-gray-700 rounded-lg cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors group"
+                        }, [
+                            React.createElement('p', {
+                                key: 'url',
+                                className: "text-sm font-medium text-gray-900 dark:text-white truncate"
+                            }, item),
+                            React.createElement('p', {
+                                key: 'full-url',
+                                className: "text-xs text-gray-500 dark:text-gray-400 truncate"
+                            }, item.startsWith('http') ? item : `https://${item}`)
+                        ])
+                    )))
+                ]))
+            ]);
+        };
+
+        // Header Component
+        const Header = ({
+            url,
+            setUrl,
+            loadUrl,
+            darkMode,
+            setDarkMode,
+            screenCount,
+            setScreenCount,
+            timerDuration,
+            setTimerDuration,
+            layout,
+            setLayout,
+            showHistory,
+            setShowHistory
+        }) => {
+            const screenOptions = [5, 10, 15, 20, 30, 40, 50];
+            const timerOptions = [10, 20, 30, 60];
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                loadUrl();
+            };
+
+            return React.createElement('header', {
+                className: "bg-white dark:bg-gray-800 shadow-lg sticky top-0 z-40"
+            }, React.createElement('div', {
+                className: "container mx-auto px-4 py-3"
+            }, [
+                // Main URL Input
+                React.createElement('form', {
+                    key: 'form',
+                    onSubmit: handleSubmit,
+                    className: "mb-3"
+                }, React.createElement('div', {
+                    className: "flex gap-2"
+                }, [
+                    React.createElement('div', {
+                        key: 'input-container',
+                        className: "flex-1 relative"
+                    }, [
+                        React.createElement('i', {
+                            key: 'icon',
+                            className: "fi-search absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400"
+                        }),
+                        React.createElement('input', {
+                            key: 'input',
+                            type: "text",
+                            value: url,
+                            onChange: (e) => setUrl(e.target.value),
+                            placeholder: "Enter website URL (e.g., example.com)",
+                            className: "w-full pl-10 pr-4 py-3 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        })
+                    ]),
+                    React.createElement('button', {
+                        key: 'submit',
+                        type: "submit",
+                        className: "px-6 py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors"
+                    }, "Load")
+                ])),
+
+                // Controls Row
+                React.createElement('div', {
+                    key: 'controls',
+                    className: "flex flex-wrap gap-3 items-center justify-between"
+                }, [
+                    // Screen Count Selector
+                    React.createElement('div', {
+                        key: 'screen-selector',
+                        className: "flex items-center gap-2"
+                    }, [
+                        React.createElement('label', {
+                            key: 'label',
+                            className: "text-sm font-medium text-gray-700 dark:text-gray-300 whitespace-nowrap"
+                        }, "Screens:"),
+                        React.createElement('select', {
+                            key: 'select',
+                            value: screenCount,
+                            onChange: (e) => setScreenCount(Number(e.target.value)),
+                            className: "bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md px-2 py-1 text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        }, screenOptions.map(num => 
+                            React.createElement('option', { key: num, value: num }, num)
+                        ))
+                    ]),
+
+                    // Timer Selector
+                    React.createElement('div', {
+                        key: 'timer-selector',
+                        className: "flex items-center gap-2"
+                    }, [
+                        React.createElement('label', {
+                            key: 'label',
+                            className: "text-sm font-medium text-gray-700 dark:text-gray-300 whitespace-nowrap"
+                        }, "Refresh:"),
+                        React.createElement('select', {
+                            key: 'select',
+                            value: timerDuration,
+                            onChange: (e) => setTimerDuration(Number(e.target.value)),
+                            className: "bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md px-2 py-1 text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        }, timerOptions.map(sec => 
+                            React.createElement('option', { key: sec, value: sec }, `${sec}s`)
+                        ))
+                    ]),
+
+                    // Layout Toggle
+                    React.createElement('div', {
+                        key: 'layout-toggle',
+                        className: "flex items-center gap-2"
+                    }, React.createElement('button', {
+                        onClick: () => setLayout(layout === 'stacked' ? 'carousel' : 'stacked'),
+                        className: `p-2 rounded-lg transition-colors ${
+                            layout === 'carousel' 
+                                ? 'bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-400' 
+                                : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
+                        }`,
+                        title: `Switch to ${layout === 'stacked' ? 'carousel' : 'stacked'} view`
+                    }, React.createElement('i', { className: "fi-settings" }))),
+
+                    // History Toggle
+                    React.createElement('button', {
+                        key: 'history-toggle',
+                        onClick: () => setShowHistory(!showHistory),
+                        className: "p-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition-colors",
+                        title: "Show history"
+                    }, React.createElement('i', { className: "fi-menu text-gray-600 dark:text-gray-400" })),
+
+                    // Dark Mode Toggle
+                    React.createElement('button', {
+                        key: 'dark-mode-toggle',
+                        onClick: () => setDarkMode(!darkMode),
+                        className: "p-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition-colors",
+                        title: `Switch to ${darkMode ? 'light' : 'dark'} mode`
+                    }, darkMode ? 
+                        React.createElement('i', { className: "fi-sun text-yellow-500" }) :
+                        React.createElement('i', { className: "fi-moon text-gray-600" })
+                    )
+                ])
+            ]));
+        };
+
+        // Main App Component
+        const App = () => {
+            // State
+            const [url, setUrl] = React.useState('');
+            const [currentUrl, setCurrentUrl] = React.useState('example.com');
+            const [darkMode, setDarkMode] = useLocalStorage('darkMode', false);
+            const [screenCount, setScreenCount] = useLocalStorage('screenCount', 5);
+            const [timerDuration, setTimerDuration] = useLocalStorage('timerDuration', 20);
+            const [layout, setLayout] = useLocalStorage('layout', 'stacked');
+            const [history, setHistory] = useLocalStorage('history', []);
+            const [showHistory, setShowHistory] = React.useState(false);
+            const [viewCounts, setViewCounts] = useLocalStorage('viewCounts', {});
+            const [showInterstitial, setShowInterstitial] = React.useState(false);
+            const [pendingAction, setPendingAction] = React.useState(null);
+
+            // Apply dark mode
+            React.useEffect(() => {
+                if (darkMode) {
+                    document.documentElement.classList.add('dark');
+                } else {
+                    document.documentElement.classList.remove('dark');
+                }
+            }, [darkMode]);
+
+            // Update document title
+            React.useEffect(() => {
+                document.title = `${screenCount} Screen${screenCount > 1 ? 's' : ''} - Multi View Browser`;
+            }, [screenCount]);
+
+            // Check for interstitial requirement
+            React.useEffect(() => {
+                if (requiresInterstitial(screenCount) && history.length > 0) {
+                    setShowInterstitial(true);
+                }
+            }, [screenCount]);
+
+            const loadUrl = () => {
+                if (!validateUrl(url)) {
+                    alert('Please enter a valid URL (e.g., example.com or https://example.com)');
+                    return;
+                }
+
+                const formattedUrl = formatUrl(url);
+                setCurrentUrl(formattedUrl);
+                
+                // Add to history
+                if (!history.includes(url)) {
+                    setHistory(prev => [url, ...prev.slice(0, 49)]); // Keep last 50 items
+                }
+
+                // Reset view counts for new URL
+                setViewCounts({});
+            };
+
+            const loadUrlFromHistory = (historyUrl) => {
+                setUrl(historyUrl);
+                setCurrentUrl(formatUrl(historyUrl));
+                setShowHistory(false);
+            };
+
+            const clearHistory = () => {
+                setHistory([]);
+            };
+
+            const updateViewCount = (index) => {
+                setViewCounts(prev => ({
+                    ...prev,
+                    [index]: (prev[index] || 0) + 1
+                }));
+            };
+
+            const handleScreenCountChange = (newCount) => {
+                if (requiresInterstitial(newCount) && history.length > 0) {
+                    setPendingAction(() => () => setScreenCount(newCount));
+                    setShowInterstitial(true);
+                } else {
+                    setScreenCount(newCount);
+                }
+            };
+
+            const handleInterstitialComplete = () => {
+                setShowInterstitial(false);
+                if (pendingAction) {
+                    pendingAction();
+                    setPendingAction(null);
+                }
+            };
+
+            const handleInterstitialClose = () => {
+                setShowInterstitial(false);
+                setPendingAction(null);
+            };
+
+            return React.createElement('div', {
+                className: "h-full flex flex-col bg-gray-50 dark:bg-gray-900 transition-colors"
+            }, [
+                React.createElement(Header, {
+                    key: 'header',
+                    url: url,
+                    setUrl: setUrl,
+                    loadUrl: loadUrl,
+                    darkMode: darkMode,
+                    setDarkMode: setDarkMode,
+                    screenCount: screenCount,
+                    setScreenCount: handleScreenCountChange,
+                    timerDuration: timerDuration,
+                    setTimerDuration: setTimerDuration,
+                    layout: layout,
+                    setLayout: setLayout,
+                    showHistory: showHistory,
+                    setShowHistory: setShowHistory
+                }),
+
+                React.createElement('div', {
+                    key: 'main-content',
+                    className: "flex-1 flex overflow-hidden"
+                }, [
+                    React.createElement(HistoryPanel, {
+                        key: 'history-panel',
+                        history: history,
+                        showHistory: showHistory,
+                        setShowHistory: setShowHistory,
+                        loadUrlFromHistory: loadUrlFromHistory,
+                        clearHistory: clearHistory
+                    }),
+                    
+                    React.createElement(ScreenContainer, {
+                        key: 'screen-container',
+                        url: currentUrl,
+                        screenCount: screenCount,
+                        timerDuration: timerDuration,
+                        layout: layout,
+                        viewCounts: viewCounts,
+                        updateViewCount: updateViewCount
+                    })
+                ]),
+
+                // Mobile Banner Ad
+                React.createElement(AdBanner, { key: 'ad-banner' }),
+
+                // Interstitial Ad
+                React.createElement(InterstitialAd, {
+                    key: 'interstitial-ad',
+                    isOpen: showInterstitial,
+                    onClose: handleInterstitialClose,
+                    onComplete: handleInterstitialComplete
+                })
+            ]);
+        };
+
+        // Render the app
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(React.createElement(App));
+    </script>
+</body>
+</html>
